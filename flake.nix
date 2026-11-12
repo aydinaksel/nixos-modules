@@ -38,16 +38,13 @@
       nixosModules.observability-shipper = ./modules/observability-shipper.nix;
 
       checks.${system} = {
-        observability-shipper-remote = validateAlloyConfiguration "remote" {
-          organization = "check";
+        observability-shipper-minimal = validateAlloyConfiguration "minimal" {
+          tokenFile = "/run/secrets/argus-logs-metrics-ingest-token";
+        };
+        observability-shipper-with-scrape-targets = validateAlloyConfiguration "with-scrape-targets" {
           tokenFile = "/run/secrets/argus-logs-metrics-ingest-token";
           hostProxyMetricsAddress = "127.0.0.1:9184";
-        };
-        observability-shipper-loopback = validateAlloyConfiguration "loopback" {
-          organization = "check";
-          tokenFile = null;
-          logsEndpoint = "http://127.0.0.1:3100/loki/api/v1/push";
-          metricsEndpoint = "http://127.0.0.1:9090/api/v1/write";
+          scrapeTargets.hermes = "127.0.0.1:9185";
         };
       };
 

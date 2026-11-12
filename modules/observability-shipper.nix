@@ -5,22 +5,22 @@ let
 
   tokenCredentialName = "ingest-token";
   tokenCredentialPath = "/run/credentials/alloy.service/${tokenCredentialName}";
-  sendsToken = shipper.tokenFile != null;
 
-  bearerTokenSetting = lib.optionalString sendsToken ''
-    bearer_token_file = "${tokenCredentialPath}"
-  '';
+  tracingLinePattern = ''^\d{4}-\d{2}-\d{2}T\S+Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<message>.*)$'';
 
-  hostProxyScrape = lib.optionalString (shipper.hostProxyMetricsAddress != null) ''
-    prometheus.scrape "host_proxy" {
-      targets = [{
-        "__address__" = "${shipper.hostProxyMetricsAddress}",
-        "job"         = "host-proxy",
-      }]
+  scrapeTarget = name: address: ''
+    prometheus.scrape "${name}" {
+      targets         = [{ "__address__" = "${address}" }]
       forward_to      = [prometheus.remote_write.argus.receiver]
       scrape_interval = "${toString shipper.scrapeIntervalSeconds}s"
     }
   '';
+
+  scrapeTargets =
+    shipper.scrapeTargets
+    // lib.optionalAttrs (shipper.hostProxyMetricsAddress != null) {
+      host_proxy = shipper.hostProxyMetricsAddress;
+    };
 
   alloyConfiguration = ''
     loki.relabel "journal" {
@@ -33,21 +33,32 @@ let
     }
 
     loki.source.journal "system" {
-      forward_to    = [loki.write.argus.receiver]
+      forward_to    = [loki.process.tracing.receiver]
       relabel_rules = loki.relabel.journal.rules
       max_age       = "12h"
+      labels        = { job = "systemd-journal" }
+    }
 
-      labels = {
-        job          = "systemd-journal",
-        host         = "${shipper.hostLabel}",
-        organization = "${shipper.organization}",
+    loki.process "tracing" {
+      forward_to = [loki.write.argus.receiver]
+
+      stage.regex {
+        expression = `${tracingLinePattern}`
+      }
+
+      stage.structured_metadata {
+        values = { level = "" }
+      }
+
+      stage.output {
+        source = "message"
       }
     }
 
     loki.write "argus" {
       endpoint {
-        url = "${shipper.logsEndpoint}"
-        ${bearerTokenSetting}
+        url               = "${shipper.logsEndpoint}"
+        bearer_token_file = "${tokenCredentialPath}"
       }
     }
 
@@ -59,17 +70,11 @@ let
       scrape_interval = "${toString shipper.scrapeIntervalSeconds}s"
     }
 
-    ${hostProxyScrape}
-
+    ${lib.concatStrings (lib.mapAttrsToList scrapeTarget scrapeTargets)}
     prometheus.remote_write "argus" {
       endpoint {
-        url = "${shipper.metricsEndpoint}"
-        ${bearerTokenSetting}
-      }
-
-      external_labels = {
-        host         = "${shipper.hostLabel}",
-        organization = "${shipper.organization}",
+        url               = "${shipper.metricsEndpoint}"
+        bearer_token_file = "${tokenCredentialPath}"
       }
     }
   '';
@@ -82,34 +87,18 @@ let
 in
 {
   options.services.observabilityShipper = {
-    enable = lib.mkEnableOption "shipping this host's journal and machine metrics to argus with Grafana Alloy";
-
-    organization = lib.mkOption {
-      type = lib.types.str;
-      example = "chichek";
-      description = ''
-        Value of the organization label on every log line and metric. Argus
-        keeps every host in one tenant, so this label separates them at query
-        time.
-      '';
-    };
+    enable = lib.mkEnableOption "shipping this host's journal and metrics to argus with Grafana Alloy";
 
     tokenFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
+      type = lib.types.str;
       example = lib.literalExpression ''config.sops.secrets."argus-logs-metrics-ingest-token".path'';
       description = ''
-        Path to this host's bearer token for the argus ingest endpoints. systemd
-        reads it as root and hands it to Alloy as a credential, because Alloy
-        runs under DynamicUser and cannot own the file. Null sends no token,
-        for argus shipping to its own Loki and Prometheus over loopback.
+        Path to this host's bearer token for the argus ingest endpoints. Argus
+        maps the token to this host's tenant, so the token is the host's whole
+        identity: nothing the host labels itself is trusted. systemd reads the
+        file as root and hands it to Alloy as a credential, because Alloy runs
+        under DynamicUser and cannot own it.
       '';
-    };
-
-    hostLabel = lib.mkOption {
-      type = lib.types.str;
-      default = config.networking.hostName;
-      defaultText = lib.literalExpression "config.networking.hostName";
-      description = "Value of the host label on every log line and metric.";
     };
 
     logsEndpoint = lib.mkOption {
@@ -120,8 +109,8 @@ in
 
     metricsEndpoint = lib.mkOption {
       type = lib.types.str;
-      default = "https://metrics.aksel.biz/api/v1/write";
-      description = "Prometheus remote-write endpoint on argus.";
+      default = "https://metrics.aksel.biz/api/v1/push";
+      description = "Mimir remote-write endpoint on argus.";
     };
 
     hostProxyMetricsAddress = lib.mkOption {
@@ -135,6 +124,19 @@ in
       '';
     };
 
+    scrapeTargets = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = {
+        hermes = "127.0.0.1:9185";
+      };
+      description = ''
+        Local Prometheus endpoints to scrape and forward, keyed by a name made of
+        letters, digits and underscores, such as an application serving its own
+        metrics on loopback.
+      '';
+    };
+
     scrapeIntervalSeconds = lib.mkOption {
       type = lib.types.ints.positive;
       default = 30;
@@ -143,11 +145,20 @@ in
   };
 
   config = lib.mkIf shipper.enable {
+    assertions = [
+      {
+        assertion =
+          !(scrapeTargets ? node)
+          && lib.all (name: builtins.match "[A-Za-z0-9_]+" name != null) (lib.attrNames scrapeTargets);
+        message = "services.observabilityShipper.scrapeTargets names must be letters, digits and underscores, and not node, which names the machine metrics.";
+      }
+    ];
+
     services.alloy.enable = true;
 
     environment.etc."alloy/config.alloy".text = alloyConfiguration;
 
-    systemd.services.alloy.serviceConfig.LoadCredential = lib.mkIf sendsToken [
+    systemd.services.alloy.serviceConfig.LoadCredential = [
       "${tokenCredentialName}:${shipper.tokenFile}"
     ];
   };
