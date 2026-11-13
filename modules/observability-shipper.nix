@@ -6,7 +6,8 @@ let
   tokenCredentialName = "ingest-token";
   tokenCredentialPath = "/run/credentials/alloy.service/${tokenCredentialName}";
 
-  tracingLinePattern = ''^\d{4}-\d{2}-\d{2}T\S+Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<message>.*)$'';
+  terminalColorPattern = ''(\x1b\[[0-9;]*m)'';
+  tracingLinePattern =''^\d{4}-\d{2}-\d{2}T\S+Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<message>.*)$'';
 
   scrapeTarget = name: address: ''
     prometheus.scrape "${name}" {
@@ -41,6 +42,11 @@ let
 
     loki.process "tracing" {
       forward_to = [loki.write.argus.receiver]
+
+      stage.replace {
+        expression = `${terminalColorPattern}`
+        replace    = ""
+      }
 
       stage.regex {
         expression = `${tracingLinePattern}`
