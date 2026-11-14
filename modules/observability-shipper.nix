@@ -6,7 +6,8 @@ let
   tokenCredentialName = "ingest-token";
   tokenCredentialPath = "/run/credentials/alloy.service/${tokenCredentialName}";
 
-  terminalColorPattern = ''(\x1b\[[0-9;]*m)'';
+  serviceUnitPattern = ''.+\.service'';
+  terminalColorPattern =''(\x1b\[[0-9;]*m)'';
   tracingLinePattern =''^\d{4}-\d{2}-\d{2}T\S+Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<message>.*)$'';
 
   scrapeTarget = name: address: ''
@@ -68,7 +69,13 @@ let
       }
     }
 
-    prometheus.exporter.unix "node" { }
+    prometheus.exporter.unix "node" {
+      enable_collectors = ["systemd"]
+
+      systemd {
+        unit_include = `${serviceUnitPattern}`
+      }
+    }
 
     prometheus.scrape "node" {
       targets         = prometheus.exporter.unix.node.targets
