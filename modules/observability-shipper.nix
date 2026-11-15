@@ -36,6 +36,7 @@ let
         source_labels = ["__journal__systemd_unit"]
         target_label  = "unit"
       }
+      ${journalDropRule}
     }
 
     loki.source.journal "system" {
@@ -110,6 +111,49 @@ let
         bearer_token_file = "${tokenCredentialPath}"
       }
     }
+    ${otlpConfiguration}
+  '';
+
+  otlpConfiguration = lib.optionalString (shipper.otlpReceiverAddress != null) ''
+    local.file "ingest_token" {
+      filename  = "${tokenCredentialPath}"
+      is_secret = true
+    }
+
+    otelcol.auth.bearer "argus" {
+      token = string.trim_space(convert.nonsensitive(local.file.ingest_token.content))
+    }
+
+    otelcol.receiver.otlp "local" {
+      http {
+        endpoint = "${shipper.otlpReceiverAddress}"
+      }
+
+      output {
+        logs = [otelcol.processor.batch.argus.input]
+      }
+    }
+
+    otelcol.processor.batch "argus" {
+      output {
+        logs = [otelcol.exporter.otlphttp.argus.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "argus" {
+      client {
+        endpoint = "${shipper.otlpLogsEndpoint}"
+        auth     = otelcol.auth.bearer.argus.handler
+      }
+    }
+  '';
+
+  journalDropRule = lib.optionalString (shipper.otlpUnits != [ ]) ''
+    rule {
+      source_labels = ["__journal__systemd_unit"]
+      regex         = `${lib.concatMapStringsSep "|" lib.escapeRegex shipper.otlpUnits}`
+      action        = "drop"
+    }
   '';
 
   hostProxyMetricsAddress =
@@ -170,6 +214,34 @@ in
       '';
     };
 
+    otlpReceiverAddress = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "127.0.0.1:4318";
+      description = ''
+        Loopback address where Alloy accepts OTLP/HTTP logs from this host's
+        applications and forwards them to Loki on argus with the host's token.
+        Null runs no receiver.
+      '';
+    };
+
+    otlpLogsEndpoint = lib.mkOption {
+      type = lib.types.str;
+      default = "https://logs.aksel.biz/otlp";
+      description = "Loki OTLP endpoint on argus. The exporter appends /v1/logs.";
+    };
+
+    otlpUnits = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "hermes-server.service" ];
+      description = ''
+        Units that send their logs over OTLP. Their journal lines are not
+        shipped, so Loki gets each event once. The journal on this host keeps
+        them.
+      '';
+    };
+
     scrapeIntervalSeconds = lib.mkOption {
       type = lib.types.ints.positive;
       default = 30;
@@ -184,6 +256,10 @@ in
           !(scrapeTargets ? node)
           && lib.all (name: builtins.match "[A-Za-z0-9_]+" name != null) (lib.attrNames scrapeTargets);
         message = "services.observabilityShipper.scrapeTargets names must be letters, digits and underscores, and not node, which names the machine metrics.";
+      }
+      {
+        assertion = shipper.otlpUnits == [ ] || shipper.otlpReceiverAddress != null;
+        message = "services.observabilityShipper.otlpUnits stops shipping those units' journal lines, so it needs otlpReceiverAddress to receive their logs instead.";
       }
     ];
 

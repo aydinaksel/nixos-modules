@@ -46,6 +46,14 @@
           hostProxyMetricsAddress = "127.0.0.1:9184";
           scrapeTargets.hermes = "127.0.0.1:9185";
         };
+        observability-shipper-with-otlp = validateAlloyConfiguration "with-otlp" {
+          tokenFile = "/run/secrets/argus-logs-metrics-ingest-token";
+          otlpReceiverAddress = "127.0.0.1:4318";
+          otlpUnits = [
+            "hermes-server.service"
+            "hermes-mailer-inventory.service"
+          ];
+        };
       };
 
       formatter.${system} = pkgs.nixfmt-tree;
