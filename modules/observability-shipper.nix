@@ -9,9 +9,13 @@ let
   serviceUnitPattern = ''.+\.service'';
   terminalColorPattern =''(\x1b\[[0-9;]*m)'';
   tracingLinePattern =''^\d{4}-\d{2}-\d{2}T\S+Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<message>.*)$'';
+  journalJob = "systemd-journal";
+  journalSelector = ''{job="${journalJob}"}'';
+  jsonLinePattern = ''^\\{'';
 
   scrapeTarget = name: address: ''
     prometheus.scrape "${name}" {
+      job_name        = "${name}"
       targets         = [{ "__address__" = "${address}" }]
       forward_to      = [prometheus.remote_write.argus.receiver]
       scrape_interval = "${toString shipper.scrapeIntervalSeconds}s"
@@ -38,27 +42,43 @@ let
       forward_to    = [loki.process.tracing.receiver]
       relabel_rules = loki.relabel.journal.rules
       max_age       = "12h"
-      labels        = { job = "systemd-journal" }
+      labels        = { job = "${journalJob}" }
     }
 
     loki.process "tracing" {
       forward_to = [loki.write.argus.receiver]
 
-      stage.replace {
-        expression = `${terminalColorPattern}`
-        replace    = ""
+      stage.match {
+        selector = `${journalSelector} |~ "${jsonLinePattern}"`
+
+        stage.json {
+          expressions = { level = "" }
+        }
+
+        stage.structured_metadata {
+          values = { level = "" }
+        }
       }
 
-      stage.regex {
-        expression = `${tracingLinePattern}`
-      }
+      stage.match {
+        selector = `${journalSelector} !~ "${jsonLinePattern}"`
 
-      stage.structured_metadata {
-        values = { level = "" }
-      }
+        stage.replace {
+          expression = `${terminalColorPattern}`
+          replace    = ""
+        }
 
-      stage.output {
-        source = "message"
+        stage.regex {
+          expression = `${tracingLinePattern}`
+        }
+
+        stage.structured_metadata {
+          values = { level = "" }
+        }
+
+        stage.output {
+          source = "message"
+        }
       }
     }
 
